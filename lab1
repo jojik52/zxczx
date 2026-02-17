@@ -1,0 +1,29 @@
+#include <iostream>
+#include <cstdint>
+using namespace std;
+int main() {
+uint16_t Rlz1 = 0x1D5B;
+uint64_t Rlz2[2] = {0x9AC6B52A6A5F3C8D, 0x00000001AAAAAAA};
+if (Rlz1 == 0 || (Rlz2[0] == 0 && Rlz2[1] == 0)) {
+cerr << "Ошибка: Начальное заполнение не может быть нулевым!" << endl;
+return 1;
+}
+int counter;
+cout << "Введите количество бит: ";
+cin >> counter;
+cout << "Последовательность: ";
+for (int i = 0; i < counter; i++) {
+uint16_t bit1 = (Rlz1 & 0x1) ^ ((Rlz1 >> 1) & 0x1);
+// Сдвиг вправо.
+Rlz1 = (Rlz1 >> 1) | (bit1 << 12);
+uint64_t bit2 = (Rlz2[0] & 0x1) ^ ((Rlz2[0] >> 9) & 0x1);
+uint64_t carry = (Rlz2[0] & 0x1);
+Rlz2[0] = (Rlz2[0] >> 1) | ((Rlz2[1] & 0x1) << 63);
+Rlz2[1] = (Rlz2[1] >> 1) | (carry << 38);
+Rlz2[0] = (Rlz2[0] & ~0x1ULL) | (bit2 & 0x1);
+uint16_t bit = bit1 ^ (uint16_t)(bit2 & 0x1);
+cout << bit;
+}
+cout << endl;
+return 0;
+}
