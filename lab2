@@ -1,0 +1,69 @@
+#include <iostream>
+#include <fstream>
+#include <cstdlib>
+#include <string>
+using namespace std;
+
+int main() {
+	string in_name, out_name;
+	
+	cout << "Введите путь входного файла: ";
+	cin >> in_name;
+	cout << "Введите путь выходного файла: ";
+	cin >> out_name;
+	
+	ifstream infile(in_name, ios::binary);
+	ofstream outfile(out_name, ios::binary);
+	
+	if (!infile.is_open()) {
+		cerr << "Не удалось открыть файл " << in_name << endl;
+		return 1;
+	}
+	if (!outfile.is_open()) {
+		cerr << "Не удалось открыть файл " << out_name << endl;
+		return 1;
+	}
+	
+	// Инициализация генераторов (как в Приложении А)
+	uint16_t Rlz1 = 0x1D5B;                    // x^13+x+1
+	uint64_t Rlz2[2] = {0x9AC6B52A6A5F3C8D, 0x00000001AAAAAAA}; // x^103+x^9+1
+	
+	uint8_t buffer = 0; // Буфер для байта из файла
+	uint8_t gamma = 0;  // Байт гаммы
+	
+	cout << "Маскирование..." << endl;
+	
+	while (infile.read(reinterpret_cast<char*>(&buffer), sizeof(buffer))) {
+		
+		// Генерируем 8 бит гаммы (1 байт) за цикл
+		for (int i = 0; i < 8; i++) {
+			
+			// --- Такт генератора 1 ---
+			uint16_t bit1 = (Rlz1 & 0x1) ^ ((Rlz1 >> 1) & 0x1);
+			Rlz1 = (Rlz1 >> 1) | (bit1 << 12);
+			
+			// --- Такт генератора 2 ---
+			uint64_t bit2 = (Rlz2[0] & 0x1) ^ ((Rlz2[0] >> 9) & 0x1);
+			uint64_t carry = (Rlz2[0] & 0x1);
+			
+			Rlz2[0] = (Rlz2[0] >> 1) | ((Rlz2[1] & 0x1) << 63);
+			Rlz2[1] = (Rlz2[1] >> 1) | (carry << 38);
+			Rlz2[0] = (Rlz2[0] & ~0x1ULL) | (bit2 & 0x1);
+			
+			// --- Комбинирование и накопление гаммы ---
+			uint16_t bit = bit1 ^ (uint16_t)(bit2 & 0x1);
+			gamma = (gamma << 1) | (bit & 0x1); // Сдвигаем и добавляем новый бит
+		}
+		
+		// Применяем маску (XOR) и записываем результат
+		buffer = buffer ^ gamma;
+		outfile.write(reinterpret_cast<char*>(&buffer), sizeof(buffer));
+		gamma = 0; // Обнуляем байт гаммы для следующего цикла
+	}
+	
+	cout << "Готово. Замаскированные данные записаны в " << out_name << endl;
+	
+	infile.close();
+	outfile.close();
+	return 0;
+}
