@@ -1,0 +1,36 @@
+#include <iostream>
+#include <iomanip>
+#include <cstdint>
+using namespace std;
+
+int main() {
+    // Таблица замены S для варианта 4
+    uint8_t S[16] = {
+        0x0C, 0x08, 0x02, 0x01, 0x0D, 0x04, 0x0F, 0x06,
+        0x07, 0x00, 0x0A, 0x05, 0x03, 0x0E, 0x09, 0x0B
+    };
+    int p = 3;
+    
+    // Формируем таблицу S*
+    uint8_t Sa[256] = {0};
+    for(int i = 0; i < 16; i++) {
+        for(int j = 0; j < 16; j++) {
+            Sa[i * 16 + j] = (S[i] << 4) | S[j];
+        }
+    }
+    
+    // Формируем эквивалентную таблицу Seq
+    uint8_t Seq[256] = {0};
+    for(int i = 0; i < 256; i++) {
+        Seq[i] = (Sa[i] >> p) | (Sa[i] << (8 - p));
+    }
+    
+    // Выводим таблицу Seq
+    cout << "Эквивалентная таблица подстановки Seq (256 байт):\n";
+    for(int i = 0; i < 256; i++) {
+        cout << hex << setw(2) << setfill('0') << (int)Seq[i] << " ";
+        if((i + 1) % 16 == 0) cout << "\n";
+    }
+    
+    return 0;
+}
