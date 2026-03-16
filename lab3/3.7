@@ -1,0 +1,59 @@
+#include <iostream>
+#include <fstream>
+#include <string>
+#include <iomanip>
+#include <cstdint>
+using namespace std;
+
+int main() {
+    // Таблица замены S для варианта 4
+    uint8_t S[16] = {
+        0x0C, 0x08, 0x02, 0x01, 0x0D, 0x04, 0x0F, 0x06,
+        0x07, 0x00, 0x0A, 0x05, 0x03, 0x0E, 0x09, 0x0B
+    };
+    int p = 3;
+    
+    cout << "Введите имя файла: ";
+    string filename;
+    cin >> filename;
+    
+    string output = filename + "_encoded_eq";
+    
+    ifstream infile(filename, ios::binary);
+    ofstream outfile(output, ios::binary);
+    
+    if(!infile.is_open() || !outfile.is_open()) {
+        cerr << "Ошибка открытия файлов!" << endl;
+        return 1;
+    }
+    
+    // Формируем таблицу S*
+    uint8_t Sa[256] = {0};
+    for(int i = 0; i < 16; i++) {
+        for(int j = 0; j < 16; j++) {
+            Sa[i * 16 + j] = (S[i] << 4) | S[j];
+        }
+    }
+    
+    // Формируем эквивалентную таблицу Seq
+    uint8_t Seq[256] = {0};
+    for(int i = 0; i < 256; i++) {
+        Seq[i] = (Sa[i] >> p) | (Sa[i] << (8 - p));
+    }
+    
+    // Преобразуем файл с использованием эквивалентной таблицы
+    uint8_t buffer = 0;
+    while(infile.read(reinterpret_cast<char*>(&buffer), sizeof(buffer))) {
+        buffer = Seq[buffer];
+        outfile.write(reinterpret_cast<char*>(&buffer), sizeof(buffer));
+    }
+    
+    infile.close();
+    outfile.close();
+    
+    cout << "Преобразование с эквивалентной таблицей завершено.\n";
+    cout << "Для сравнения файлов выполните команду: cmp " << filename << "_encoded " 
+         << filename << "_encoded_eq" << endl;
+    
+    return 0;
+}
