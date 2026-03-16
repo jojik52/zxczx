@@ -1,0 +1,70 @@
+#include <iostream>
+#include <iomanip>
+#include <cstdint>
+using namespace std;
+
+int main() {
+    // Таблица замены S для варианта 4: C, 8, 2, 1, D, 4, F, 6, 7, 0, A, 5, 3, E, 9, B
+    uint8_t S[16] = {
+        0x0C, 0x08, 0x02, 0x01, 0x0D, 0x04, 0x0F, 0x06,
+        0x07, 0x00, 0x0A, 0x05, 0x03, 0x0E, 0x09, 0x0B
+    };
+    
+    // Исходный 64-битный вектор a = 0x0123456789ABCDEF
+    uint64_t a = 0x0123456789ABCDEF;
+    
+    // Пункт 3.1: Подстановка 4×4
+    uint8_t mass_a[16] = {0};
+    
+    // Разбиваем 64-битный вектор на 16 частей по 4 бита
+    for(int i = 0; i < 16; i++) {
+        mass_a[i] = (uint8_t)((a >> (60 - 4 * i)) & 0x0F);
+    }
+    
+    // Выполняем подстановку
+    uint64_t a_zamena = 0;
+    for(int i = 0; i < 16; i++) {
+        a_zamena = a_zamena | ((uint64_t)S[mass_a[i]] << (60 - 4 * i));
+    }
+    
+    // Пункт 3.2: Формирование таблицы S* (подстановка двух смежных 4-битных векторов)
+    uint8_t Sa[256] = {0};
+    for(int i = 0; i < 16; i++) {
+        for(int j = 0; j < 16; j++) {
+            Sa[i * 16 + j] = (S[i] << 4) | S[j];
+        }
+    }
+    
+    // Выполняем подстановку с использованием S*
+    uint64_t a_zamena2 = 0;
+    for(int i = 0; i < 8; i++) {
+        uint8_t byte = (a >> (56 - 8 * i)) & 0xFF;
+        a_zamena2 = a_zamena2 | ((uint64_t)Sa[byte] << (56 - 8 * i));
+    }
+    
+    // Пункт 3.3: Циклический сдвиг вправо на p=3 бита
+    int p = 3;
+    uint64_t sdvig = 0;
+    for(int i = 0; i < 8; i++) {
+        uint8_t byte = (a >> (56 - 8 * i)) & 0xFF;
+        byte = (byte >> p) | (byte << (8 - p));
+        sdvig = sdvig | ((uint64_t)byte << (56 - 8 * i));
+    }
+    
+    // Вывод результатов
+    cout << hex << uppercase << setfill('0');
+    cout << "Исходное число: 0x" << setw(16) << a << endl;
+    cout << "После подстановки (п. 3.1): 0x" << setw(16) << a_zamena << endl;
+    cout << "После подстановки (п. 3.2): 0x" << setw(16) << a_zamena2 << endl;
+    cout << "После циклического сдвига на " << dec << p << " бита (п. 3.3): 0x" 
+         << hex << setw(16) << sdvig << endl;
+    
+    // Вывод таблицы S*
+    cout << "\nТаблица замены S* (256 байт):\n";
+    for(int i = 0; i < 256; i++) {
+        cout << setw(2) << (int)Sa[i] << " ";
+        if((i + 1) % 16 == 0) cout << endl;
+    }
+    
+    return 0;
+}
