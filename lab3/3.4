@@ -1,0 +1,41 @@
+#include <iostream>
+#include <cstdint>
+using namespace std;
+
+// Функция, реализующая схему: подстановка S, затем объединение, затем циклический сдвиг
+uint8_t komb(uint8_t x, const uint8_t S[16], int p) {
+    // Разделяем байт на два 4-битных вектора
+    uint8_t x1 = (x >> 4) & 0x0F;  // старшие 4 бита
+    uint8_t x2 = x & 0x0F;          // младшие 4 бита
+    
+    // Подстановка
+    uint8_t y1 = S[x1];
+    uint8_t y2 = S[x2];
+    
+    // Объединение
+    uint8_t xy = (y1 << 4) | y2;
+    
+    // Циклический сдвиг вправо на p бит
+    uint8_t result = (xy >> p) | (xy << (8 - p));
+    
+    return result;
+}
+
+int main() {
+    // Таблица замены S для варианта 4
+    uint8_t S[16] = {
+        0x0C, 0x08, 0x02, 0x01, 0x0D, 0x04, 0x0F, 0x06,
+        0x07, 0x00, 0x0A, 0x05, 0x03, 0x0E, 0x09, 0x0B
+    };
+    int p = 3;  // сдвиг для варианта 4
+    
+    // Проверка на тестовых данных
+    uint8_t test = 0xAB;  // 10101011₂
+    uint8_t result = komb(test, S, p);
+    
+    cout << hex << uppercase;
+    cout << "Входной байт: 0x" << (int)test << endl;
+    cout << "Результат преобразования: 0x" << (int)result << endl;
+    
+    return 0;
+}
