@@ -1,0 +1,395 @@
+#include <iostream>
+#include <fstream>
+#include <string>
+#include <cstdint>
+#include <cstring>
+using namespace std;
+
+// Генератор ПСП (из первой работы)
+uint8_t generate_bit(uint16_t& Rlz1, uint64_t* Rlz2) {
+    uint16_t bit1 = (Rlz1 & 0x1) ^ ((Rlz1 >> 1) & 0x1);
+    Rlz1 = (Rlz1 >> 1) | (bit1 << 12);
+    
+    uint64_t bit2 = (Rlz2[0] & 0x1) ^ ((Rlz2[0] >> 9) & 0x1);
+    uint64_t carry = (Rlz2[0] & 0x1);
+    Rlz2[0] = (Rlz2[0] >> 1) | ((Rlz2[1] & 0x1) << 63);
+    Rlz2[1] = (Rlz2[1] >> 1) | (carry << 38);
+    Rlz2[0] = (Rlz2[0] & ~0x1ULL) | (bit2 & 0x1);
+    
+    return bit1 ^ (uint16_t)(bit2 & 0x1);
+}
+
+uint32_t prng_next(uint16_t& Rlz1, uint64_t* Rlz2) {
+    uint32_t result = 0;
+    for (int i = 0; i < 32; i++) {
+        result |= (generate_bit(Rlz1, Rlz2) << i);
+    }
+    return result;
+}
+
+// Очистка памяти случайными данными
+void burn(volatile void* ptr, size_t len, uint16_t& Rlz1, uint64_t* Rlz2) {
+    if (!ptr) return;
+    auto* p = static_cast<volatile uint8_t*>(ptr);
+    for (size_t i = 0; i < len; i++) {
+        p[i] = prng_next(Rlz1, Rlz2) & 0xFF;
+    }
+}
+
+// Функция раунда шифрования (та же, что в Приложении А)
+void round_encrypt(volatile uint32_t* a0, volatile uint32_t* a1,
+                   const volatile uint32_t* roundKey,
+                   const volatile uint8_t S[4][256]) {
+    if (!a0 || !a1 || !roundKey || !S) return;
+    
+    volatile uint32_t summ = (*a0) + (*roundKey);
+    volatile uint32_t temp = 0;
+    temp |= (uint32_t)S[0][(summ >> 0) & 0xFF] << 0;
+    temp |= (uint32_t)S[1][(summ >> 8) & 0xFF] << 8;
+    temp |= (uint32_t)S[2][(summ >> 16) & 0xFF] << 16;
+    temp |= (uint32_t)S[3][(summ >> 24) & 0xFF] << 24;
+    
+    volatile uint32_t sdvig = (temp << 11) | (temp >> (32 - 11));
+    uint32_t result = *a1 ^ sdvig;
+    
+    *a1 = *a0;
+    *a0 = result;
+}
+
+// Дополнение по процедуре 2 (ГОСТ Р 34.13-2015)
+size_t pad_data(uint8_t* buffer, size_t len, size_t block_size) {
+    size_t remainder = len % block_size;
+    size_t padding_len;
+    if (remainder == 0) {
+        padding_len = block_size;
+    } else {
+        padding_len = block_size - remainder;
+    }
+    buffer[len] = 0x80;
+    for (size_t i = 1; i < padding_len; i++) {
+        buffer[len + i] = 0x00;
+    }
+    return len + padding_len;
+}
+
+// Удаление дополнения
+size_t unpad_data(uint8_t* buffer, size_t len) {
+    for (size_t i = len; i > 0; i--) {
+        if (buffer[i - 1] == 0x80) {
+            bool valid = true;
+            for (size_t j = i; j < len; j++) {
+                if (buffer[j] != 0x00) {
+                    valid = false;
+                    break;
+                }
+            }
+            if (valid) return i - 1;
+        }
+    }
+    return len;
+}
+
+// Проверка лимита ключа
+bool check_key_limit(size_t bytes_to_encrypt, volatile size_t& g_encrypted_bytes, volatile bool& g_blocked) {
+    const size_t WARN_LIMIT = 10 * 1024;
+    const size_t BLOCK_LIMIT = 20 * 1024;
+    
+    if (g_blocked) {
+        cerr << "БЛОКИРОВКА: Превышен лимит использования ключа (20 КБ)" << endl;
+        return false;
+    }
+    
+    if (g_encrypted_bytes + bytes_to_encrypt > BLOCK_LIMIT) {
+        cerr << "БЛОКИРОВКА: Попытка зашифровать более 20 КБ на одном ключе!" << endl;
+        return false;
+    }
+    
+    if (g_encrypted_bytes < WARN_LIMIT && g_encrypted_bytes + bytes_to_encrypt >= WARN_LIMIT) {
+        cerr << "ПРЕДУПРЕЖДЕНИЕ: Превышен лимит 10 КБ. Рекомендуется сменить ключ!" << endl;
+    }
+    
+    return true;
+}
+
+// Генерация ключа
+bool generate_key_file(const char* key_path, uint16_t& Rlz1, uint64_t* Rlz2) {
+    uint32_t key = prng_next(Rlz1, Rlz2);
+    ofstream outfile(key_path, ios::binary);
+    if (!outfile) {
+        cerr << "Ошибка создания файла ключа: " << key_path << endl;
+        return false;
+    }
+    outfile.write(reinterpret_cast<char*>(&key), sizeof(key));
+    outfile.close();
+    cout << "Ключ сгенерирован: " << key_path << endl;
+    cout << "Значение: 0x" << hex << key << dec << endl;
+    burn(&key, sizeof(key), Rlz1, Rlz2);
+    return true;
+}
+
+// Загрузка ключа из файла
+bool load_key_file(const char* key_path, volatile uint32_t& key, uint16_t& Rlz1, uint64_t* Rlz2) {
+    ifstream infile(key_path, ios::binary);
+    if (!infile) {
+        cerr << "Ошибка открытия файла ключа: " << key_path << endl;
+        return false;
+    }
+    infile.read(reinterpret_cast<char*>(const_cast<uint32_t*>(&key)), sizeof(key));
+    infile.close();
+    return true;
+}
+
+// Шифрование файла
+bool encrypt_file(const char* in_path, const char* out_path,
+                  volatile uint32_t ROUND_KEYS[32],
+                  const volatile uint8_t S[4][256],
+                  volatile size_t& g_encrypted_bytes,
+                  volatile bool& g_blocked,
+                  uint16_t& Rlz1, uint64_t* Rlz2) {
+    const size_t BLOCK_SIZE = 8;
+    
+    if (g_blocked) {
+        cerr << "Программа заблокирована" << endl;
+        return false;
+    }
+    
+    ifstream infile(in_path, ios::binary);
+    if (!infile) {
+        cerr << "Ошибка открытия: " << in_path << endl;
+        return false;
+    }
+    
+    infile.seekg(0, ios::end);
+    size_t file_size = infile.tellg();
+    infile.seekg(0, ios::beg);
+    
+    if (!check_key_limit(file_size, g_encrypted_bytes, g_blocked)) {
+        infile.close();
+        return false;
+    }
+    
+    size_t buffer_size = file_size + BLOCK_SIZE;
+    volatile uint8_t* buffer = new volatile uint8_t[buffer_size];
+    
+    infile.read(reinterpret_cast<char*>(const_cast<uint8_t*>(buffer)), file_size);
+    infile.close();
+    
+    size_t padded_size = pad_data(const_cast<uint8_t*>(buffer), file_size, BLOCK_SIZE);
+    g_encrypted_bytes += file_size;
+    
+    ofstream outfile(out_path, ios::binary);
+    if (!outfile) {
+        cerr << "Ошибка создания: " << out_path << endl;
+        burn(const_cast<uint8_t*>(buffer), buffer_size, Rlz1, Rlz2);
+        delete[] buffer;
+        return false;
+    }
+    
+    for (size_t offset = 0; offset < padded_size; offset += BLOCK_SIZE) {
+        volatile uint32_t a0 = 0, a1 = 0;
+        
+        a0 = (buffer[offset] << 24) | (buffer[offset + 1] << 16) |
+             (buffer[offset + 2] << 8) | buffer[offset + 3];
+        a1 = (buffer[offset + 4] << 24) | (buffer[offset + 5] << 16) |
+             (buffer[offset + 6] << 8) | buffer[offset + 7];
+        
+        for (int i = 0; i < 32; i++) {
+            round_encrypt(const_cast<uint32_t*>(&a0), const_cast<uint32_t*>(&a1),
+                         &ROUND_KEYS[i], S);
+        }
+        
+        volatile uint32_t tmp = a0;
+        a0 = a1;
+        a1 = tmp;
+        
+        uint8_t out_block[BLOCK_SIZE];
+        out_block[0] = (a0 >> 24) & 0xFF;
+        out_block[1] = (a0 >> 16) & 0xFF;
+        out_block[2] = (a0 >> 8) & 0xFF;
+        out_block[3] = a0 & 0xFF;
+        out_block[4] = (a1 >> 24) & 0xFF;
+        out_block[5] = (a1 >> 16) & 0xFF;
+        out_block[6] = (a1 >> 8) & 0xFF;
+        out_block[7] = a1 & 0xFF;
+        
+        outfile.write(reinterpret_cast<char*>(out_block), BLOCK_SIZE);
+    }
+    
+    outfile.close();
+    burn(const_cast<uint8_t*>(buffer), buffer_size, Rlz1, Rlz2);
+    delete[] buffer;
+    
+    cout << "Зашифровано: " << out_path << " (" << file_size << " байт)" << endl;
+    return true;
+}
+
+// Расшифрование файла
+bool decrypt_file(const char* in_path, const char* out_path,
+                  volatile uint32_t ROUND_KEYS[32],
+                  const volatile uint8_t S[4][256],
+                  uint16_t& Rlz1, uint64_t* Rlz2) {
+    const size_t BLOCK_SIZE = 8;
+    
+    ifstream infile(in_path, ios::binary);
+    if (!infile) {
+        cerr << "Ошибка открытия: " << in_path << endl;
+        return false;
+    }
+    
+    infile.seekg(0, ios::end);
+    size_t file_size = infile.tellg();
+    infile.seekg(0, ios::beg);
+    
+    if (file_size % BLOCK_SIZE != 0) {
+        cerr << "Ошибка: размер не кратен " << BLOCK_SIZE << " байт" << endl;
+        infile.close();
+        return false;
+    }
+    
+    volatile uint8_t* encrypted_buffer = new volatile uint8_t[file_size];
+    infile.read(reinterpret_cast<char*>(const_cast<uint8_t*>(encrypted_buffer)), file_size);
+    infile.close();
+    
+    uint8_t* decrypted_buffer = new uint8_t[file_size];
+    
+    for (size_t offset = 0; offset < file_size; offset += BLOCK_SIZE) {
+        volatile uint32_t b0 = 0, b1 = 0;
+        
+        b0 = (encrypted_buffer[offset] << 24) | (encrypted_buffer[offset + 1] << 16) |
+             (encrypted_buffer[offset + 2] << 8) | encrypted_buffer[offset + 3];
+        b1 = (encrypted_buffer[offset + 4] << 24) | (encrypted_buffer[offset + 5] << 16) |
+             (encrypted_buffer[offset + 6] << 8) | encrypted_buffer[offset + 7];
+        
+        for (int i = 31; i >= 0; i--) {
+            round_encrypt(const_cast<uint32_t*>(&b0), const_cast<uint32_t*>(&b1),
+                         &ROUND_KEYS[i], S);
+        }
+        
+        volatile uint32_t tmp = b0;
+        b0 = b1;
+        b1 = tmp;
+        
+        decrypted_buffer[offset] = (b0 >> 24) & 0xFF;
+        decrypted_buffer[offset + 1] = (b0 >> 16) & 0xFF;
+        decrypted_buffer[offset + 2] = (b0 >> 8) & 0xFF;
+        decrypted_buffer[offset + 3] = b0 & 0xFF;
+        decrypted_buffer[offset + 4] = (b1 >> 24) & 0xFF;
+        decrypted_buffer[offset + 5] = (b1 >> 16) & 0xFF;
+        decrypted_buffer[offset + 6] = (b1 >> 8) & 0xFF;
+        decrypted_buffer[offset + 7] = b1 & 0xFF;
+    }
+    
+    size_t unpadded = unpad_data(decrypted_buffer, file_size);
+    
+    ofstream outfile(out_path, ios::binary);
+    if (!outfile) {
+        cerr << "Ошибка создания: " << out_path << endl;
+        burn(decrypted_buffer, file_size, Rlz1, Rlz2);
+        delete[] decrypted_buffer;
+        delete[] encrypted_buffer;
+        return false;
+    }
+    
+    outfile.write(reinterpret_cast<char*>(decrypted_buffer), unpadded);
+    outfile.close();
+    
+    burn(decrypted_buffer, file_size, Rlz1, Rlz2);
+    burn(const_cast<uint8_t*>(encrypted_buffer), file_size, Rlz1, Rlz2);
+    delete[] decrypted_buffer;
+    delete[] encrypted_buffer;
+    
+    cout << "Расшифровано: " << out_path << " (" << unpadded << " байт)" << endl;
+    return true;
+}
+
+int main(int argc, char** argv) {
+    // Инициализация ПСП
+    uint16_t Rlz1 = 0x1D5B;
+    uint64_t Rlz2[2] = {0x9AC6B52A6A5F3C8D, 0x00000001AAAAAAA};
+    
+    // Таблицы замены π0-π7
+    const uint8_t pi[8][16] = {
+        {12,4,6,2,10,5,11,9,14,8,13,7,0,3,15,1},
+        {6,8,2,3,9,10,5,12,1,14,4,7,11,13,0,15},
+        {11,3,5,8,2,15,10,13,14,1,7,4,12,9,6,0},
+        {12,8,2,1,13,4,15,6,7,0,10,5,3,14,9,11},
+        {7,15,5,10,8,1,6,13,0,9,3,14,11,4,2,12},
+        {5,13,15,6,9,2,12,10,11,7,8,1,4,3,14,0},
+        {8,14,2,5,6,9,1,12,15,4,11,0,13,10,3,7},
+        {1,7,14,13,0,5,8,3,4,15,10,6,9,12,11,2}
+    };
+    
+    // Таблицы подстановки S[4][256]
+    volatile uint8_t S[4][256];
+    for (int i = 0; i < 256; i++) {
+        uint8_t high = (i >> 4) & 0x0F;
+        uint8_t low = i & 0x0F;
+        S[0][i] = (pi[1][high] << 4) | pi[0][low];
+        S[1][i] = (pi[3][high] << 4) | pi[2][low];
+        S[2][i] = (pi[5][high] << 4) | pi[4][low];
+        S[3][i] = (pi[7][high] << 4) | pi[6][low];
+    }
+    
+    volatile uint32_t iterativeKey[32] = {0};
+    volatile size_t g_encrypted_bytes = 0;
+    volatile bool g_blocked = false;
+    volatile uint32_t key = 0;
+    
+    if (argc < 2) {
+        cout << "Использование:\n";
+        cout << " " << argv[0] << " gen <key.key>           - Генерация ключа\n";
+        cout << " " << argv[0] << " enc <key.key> <in.txt> <out.enc> - Шифрование\n";
+        cout << " " << argv[0] << " dec <key.key> <in.enc> <out.txt> - Расшифрование\n";
+        return 1;
+    }
+    
+    string cmd = argv[1];
+    bool ok = false;
+    
+    if (cmd == "gen" && argc >= 3) {
+        ok = generate_key_file(argv[2], Rlz1, Rlz2);
+    } else if (cmd == "enc" && argc >= 5) {
+        if (load_key_file(argv[2], key, Rlz1, Rlz2)) {
+            // Развертывание ключа
+            volatile uint32_t testKey[8];
+            for (int i = 0; i < 8; i++) testKey[i] = key;
+            
+            for (int i = 0; i < 3; i++) {
+                for (int j = 0; j < 8; j++) {
+                    iterativeKey[j + 8 * i] = testKey[j];
+                }
+            }
+            for (int i = 0; i < 8; i++) {
+                iterativeKey[i + 24] = testKey[7 - i];
+            }
+            
+            ok = encrypt_file(argv[3], argv[4], iterativeKey, S, g_encrypted_bytes, g_blocked, Rlz1, Rlz2);
+        }
+    } else if (cmd == "dec" && argc >= 5) {
+        if (load_key_file(argv[2], key, Rlz1, Rlz2)) {
+            volatile uint32_t testKey[8];
+            for (int i = 0; i < 8; i++) testKey[i] = key;
+            
+            for (int i = 0; i < 3; i++) {
+                for (int j = 0; j < 8; j++) {
+                    iterativeKey[j + 8 * i] = testKey[j];
+                }
+            }
+            for (int i = 0; i < 8; i++) {
+                iterativeKey[i + 24] = testKey[7 - i];
+            }
+            
+            ok = decrypt_file(argv[3], argv[4], iterativeKey, S, Rlz1, Rlz2);
+        }
+    } else {
+        cout << "Неизвестная команда или неверные аргументы" << endl;
+        return 1;
+    }
+    
+    // Очистка криптографически опасной информации
+    burn(const_cast<uint32_t*>(&key), sizeof(key), Rlz1, Rlz2);
+    burn(const_cast<uint32_t*>(iterativeKey), sizeof(iterativeKey), Rlz1, Rlz2);
+    burn(const_cast<uint8_t(*)[256]>(S), sizeof(S), Rlz1, Rlz2);
+    
+    return ok ? 0 : 1;
+}
