@@ -15,20 +15,20 @@ void round_encrypt(volatile uint32_t* a0, volatile uint32_t* a1,
     volatile uint32_t summ = (*a0) + (*roundKey);
     
     // Подстановка через 4 таблицы по 256 байт
-    volatile uint32_t temp = 0;
-    temp |= (uint32_t)S[0][(summ >> 0) & 0xFF] << 0;
+    volatile uint32_t temp = 0; //врем перемен для резов  ( чтобы компилятор не оптимизировал)
+    temp |= (uint32_t)S[0][(summ >> 0) & 0xFF] << 0; (берется млбайт замен по табоицк с0 и объединяется с темп через ор)
     temp |= (uint32_t)S[1][(summ >> 8) & 0xFF] << 8;
     temp |= (uint32_t)S[2][(summ >> 16) & 0xFF] << 16;
     temp |= (uint32_t)S[3][(summ >> 24) & 0xFF] << 24;
     
     // Циклический сдвиг влево на 11 бит
-    volatile uint32_t sdvig = (temp << 11) | (temp >> (32 - 11));
+    volatile uint32_t sdvig = (temp << 11) | (temp >> (32 - 11)); (сдвиг влево на 11(0-20 едут на 11-31) , потом вправо на 21 бит ) все это объединяется и получается крч сдвиг 
     
     // XOR с левым подблоком
-    uint32_t result = *a1 ^ sdvig;
+    uint32_t result = *a1 ^ sdvig; 
     
     // Обмен подблоков
-    *a1 = *a0;
+    *a1 = *a0; ( * - указатель на переменную , ссылатеся по адресу)
     *a0 = result;
 }
 
