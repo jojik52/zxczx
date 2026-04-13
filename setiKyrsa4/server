@@ -1,0 +1,302 @@
+/*
+    СЕРВЕР - Курсовая работа
+    Студент: Бусыгин Г.С.
+    Группа: 23ПТ1
+    Тема: Перевод чисел (клиент-сервер)
+    Компиляция: g++ -std=c++11 -pthread server.cpp -o server
+*/
+
+#include <iostream>
+#include <string>
+#include <cstring>
+#include <sstream>
+#include <map>
+#include <thread>
+#include <mutex>
+
+#include <sys/socket.h>
+#include <sys/types.h>
+#include <netinet/in.h>
+#include <arpa/inet.h>
+#include <unistd.h>
+#include <errno.h>
+
+#define PORT 3333
+#define BUFFER_SIZE 1024
+#define MAX_CLIENTS 10
+#define ALLOWED_IP "127.0.0.1"
+
+using namespace std;
+
+// Структура для хранения информации о клиенте
+struct ClientInfo {
+    int socket;
+    string ip;
+    string bases;
+    bool active;
+};
+
+// Глобальные переменные
+map<int, ClientInfo> g_clients;
+mutex g_mutex;
+bool serverRunning = true;
+
+bool IsIPAllowed(const string& ip) {
+    return (ip == ALLOWED_IP);
+}
+
+int SendMsg(int sock, const string& msg) {
+    string data = msg + "\n";
+    int result = send(sock, data.c_str(), data.length(), 0);
+    if (result == -1) {
+        cerr << "[ОШИБКА] send(): " << strerror(errno) << endl;
+    }
+    return result;
+}
+
+string RecvMsg(int sock) {
+    char buffer[BUFFER_SIZE];
+    memset(buffer, 0, BUFFER_SIZE);
+    int bytes = recv(sock, buffer, BUFFER_SIZE - 1, 0);
+    if (bytes <= 0) {
+        return "";
+    }
+    string msg(buffer);
+    while (!msg.empty() && (msg.back() == '\n' || msg.back() == '\r')) {
+        msg.pop_back();
+    }
+    return msg;
+}
+
+// Поток для обслуживания клиента
+void ClientThread(int clientSock) {
+    g_mutex.lock();
+    string clientIP = g_clients[clientSock].ip;
+    string clientBases = g_clients[clientSock].bases;
+    g_mutex.unlock();
+    
+    cout << "\n===== НАЧАЛО ОБСЛУЖИВАНИЯ КЛИЕНТА =====" << endl;
+    cout << "[СЕРВЕР] IP: " << clientIP << endl;
+    cout << "[СЕРВЕР] Настройки: " << clientBases << endl;
+    
+    // ОТПРАВЛЯЕМ НАСТРОЙКИ СРАЗУ ПРИ ПОДКЛЮЧЕНИИ
+    SendMsg(clientSock, "OK:BASES:" + clientBases);
+    cout << "[ОТВЕТ] OK:BASES:" << clientBases << " (отправлено при подключении)" << endl;
+    
+    // Цикл обработки команд
+    while (serverRunning) {
+        string request = RecvMsg(clientSock);
+        if (request.empty()) {
+            break;
+        }
+        
+        cout << "[ЗАПРОС от " << clientIP << "] " << request << endl;
+        
+        string command, param;
+        size_t colonPos = request.find(':');
+        if (colonPos != string::npos) {
+            command = request.substr(0, colonPos);
+            param = request.substr(colonPos + 1);
+        } else {
+            command = request;
+        }
+        
+        if (command == "GET_CONFIG") {
+            g_mutex.lock();
+            string currentBases = g_clients[clientSock].bases;
+            g_mutex.unlock();
+            SendMsg(clientSock, "OK:BASES:" + currentBases);
+            cout << "[ОТВЕТ] OK:BASES:" << currentBases << endl;
+            
+        } else if (command == "CONVERT") {
+            string number = param;
+            bool valid = true;
+            if (number.empty()) valid = false;
+            for (size_t i = 0; i < number.size(); i++) {
+                char c = number[i];
+                if (i == 0 && c == '-') continue;
+                if (!((c >= '0' && c <= '9') ||
+                      (c >= 'A' && c <= 'F') ||
+                      (c >= 'a' && c <= 'f'))) {
+                    valid = false;
+                    break;
+                }
+            }
+            
+            if (valid) {
+                SendMsg(clientSock, "OK:PROCEED");
+                cout << "[ОТВЕТ] OK:PROCEED (число " << number << ")" << endl;
+            } else {
+                SendMsg(clientSock, "ERROR:INVALID_NUMBER");
+                cout << "[ОТВЕТ] ERROR:INVALID_NUMBER (число " << number << ")" << endl;
+            }
+            
+        } else if (command == "DISCONNECT") {
+            SendMsg(clientSock, "OK:BYE");
+            cout << "[ОТВЕТ] OK:BYE" << endl;
+            break;
+        } else {
+            SendMsg(clientSock, "ERROR:UNKNOWN");
+            cout << "[ОТВЕТ] ERROR:UNKNOWN" << endl;
+        }
+    }
+    
+    cout << "===== КЛИЕНТ ОТКЛЮЧИЛСЯ =====" << endl;
+    
+    g_mutex.lock();
+    close(clientSock);
+    g_clients.erase(clientSock);
+    g_mutex.unlock();
+}
+
+// Консоль администратора
+void AdminConsole() {
+    string input;
+    while (serverRunning) {
+        cout << "ADMIN> ";
+        getline(cin, input);
+        
+        if (input == "list") {
+            g_mutex.lock();
+            if (g_clients.empty()) {
+                cout << "Нет активных клиентов" << endl;
+            } else {
+                cout << "Активные клиенты:" << endl;
+                for (auto& pair : g_clients) {
+                    cout << "  " << pair.second.ip 
+                         << " - настройки: " << pair.second.bases << endl;
+                }
+            }
+            g_mutex.unlock();
+        }
+        else if (input.substr(0, 3) == "set") {
+            string rest = input.substr(4);
+            size_t spacePos = rest.find(' ');
+            if (spacePos != string::npos) {
+                string ip = rest.substr(0, spacePos);
+                string newBases = rest.substr(spacePos + 1);
+                
+                g_mutex.lock();
+                bool found = false;
+                for (auto& pair : g_clients) {
+                    if (pair.second.ip == ip) {
+                        string oldBases = pair.second.bases;
+                        pair.second.bases = newBases;
+                        cout << "[АДМИН] Настройки для " << ip 
+                             << " изменены: " << oldBases << " -> " << newBases << endl;
+                        SendMsg(pair.second.socket, "OK:CONFIG_UPDATED:" + newBases);
+                        cout << "[АДМИН] Клиенту отправлено обновление" << endl;
+                        found = true;
+                        break;
+                    }
+                }
+                if (!found) {
+                    cout << "[АДМИН] Клиент с IP " << ip << " не найден" << endl;
+                }
+                g_mutex.unlock();
+            } else {
+                cout << "Формат: set <IP> <bases>" << endl;
+            }
+        }
+        else if (input == "exit") {
+            cout << "[АДМИН] Завершение работы сервера..." << endl;
+            serverRunning = false;
+            break;
+        }
+        else if (!input.empty()) {
+            cout << "Неизвестная команда. Доступны: list, set IP BASES, exit" << endl;
+        }
+    }
+}
+
+int main() {
+    cout << "========================================" << endl;
+    cout << "   TCP СЕРВЕР - ПЕРЕВОД ЧИСЕЛ" << endl;
+    cout << "   Студент: Бусыгин Г.С." << endl;
+    cout << "   Группа: 23ПТ1" << endl;
+    cout << "========================================" << endl;
+    
+    int serverSock = socket(AF_INET, SOCK_STREAM, 0);
+    if (serverSock == -1) {
+        cerr << "[ОШИБКА] socket(): " << strerror(errno) << endl;
+        return 1;
+    }
+    
+    int opt = 1;
+    setsockopt(serverSock, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt));
+    
+    sockaddr_in serverAddr;
+    serverAddr.sin_family = AF_INET;
+    serverAddr.sin_port = htons(PORT);
+    serverAddr.sin_addr.s_addr = INADDR_ANY;
+    
+    if (bind(serverSock, (sockaddr*)&serverAddr, sizeof(serverAddr)) == -1) {
+        cerr << "[ОШИБКА] bind(): " << strerror(errno) << endl;
+        close(serverSock);
+        return 1;
+    }
+    
+    if (listen(serverSock, MAX_CLIENTS) == -1) {
+        cerr << "[ОШИБКА] listen(): " << strerror(errno) << endl;
+        close(serverSock);
+        return 1;
+    }
+    
+    cout << "[СЕРВЕР] Запущен на порту " << PORT << endl;
+    cout << "[СЕРВЕР] Разрешенный IP: " << ALLOWED_IP << endl;
+    cout << "[СЕРВЕР] Ожидание подключений..." << endl;
+    cout << "\n========== КОНСОЛЬ АДМИНИСТРАТОРА ==========" << endl;
+    cout << "Команды:" << endl;
+    cout << "  list                     - список активных клиентов" << endl;
+    cout << "  set <IP> <bases>         - изменить настройки клиента" << endl;
+    cout << "  exit                     - выход из сервера" << endl;
+    cout << "============================================" << endl;
+    
+    thread adminThread(AdminConsole);
+    adminThread.detach();
+    
+    while (serverRunning) {
+        sockaddr_in clientAddr;
+        socklen_t clientAddrLen = sizeof(clientAddr);
+        
+        int clientSock = accept(serverSock, (sockaddr*)&clientAddr, &clientAddrLen);
+        if (clientSock == -1) {
+            if (serverRunning) {
+                cerr << "[ОШИБКА] accept(): " << strerror(errno) << endl;
+            }
+            continue;
+        }
+        
+        string clientIP = inet_ntoa(clientAddr.sin_addr);
+        cout << "\n[СЕРВЕР] Подключение от " << clientIP << endl;
+        
+        if (!IsIPAllowed(clientIP)) {
+            cout << "[СЕРВЕР] ДОСТУП ЗАПРЕЩЕН для IP " << clientIP << endl;
+            SendMsg(clientSock, "ERROR:ACCESS_DENIED");
+            close(clientSock);
+            continue;
+        }
+        
+        string defaultBases = "2,8,16";
+        
+        g_mutex.lock();
+        ClientInfo newClient;
+        newClient.socket = clientSock;
+        newClient.ip = clientIP;
+        newClient.bases = defaultBases;
+        newClient.active = true;
+        g_clients[clientSock] = newClient;
+        g_mutex.unlock();
+        
+        cout << "[СЕРВЕР] Клиент " << clientIP << " подключен" << endl;
+        cout << "[СЕРВЕР] Настройки по умолчанию: " << defaultBases << endl;
+        
+        thread clientThread(ClientThread, clientSock);
+        clientThread.detach();
+    }
+    
+    close(serverSock);
+    cout << "[СЕРВЕР] Завершение работы" << endl;
+    
+    return 0;
+}
