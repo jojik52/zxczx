@@ -5,7 +5,7 @@ using namespace std;
 
 // Функция раунда шифрования
 void round_encrypt(volatile uint32_t* a0, volatile uint32_t* a1,
-                   const volatile uint32_t* roundKey,
+                   const volatile uint32_t* roundKey, //ключ нельзя менять
                    const volatile uint8_t S[4][256]) {
     if (a0 == nullptr || a1 == nullptr || roundKey == nullptr || S == nullptr) {
         return;
